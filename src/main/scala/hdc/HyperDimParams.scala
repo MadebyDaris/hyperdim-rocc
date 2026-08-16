@@ -1,16 +1,10 @@
-import chisel3._
-import freechips.rocketchip.tile._
+package hyperdim
 
-// Config key so you can change the vector size from Chipyard's top-level configs 
-// without touching the hardware code.
+import org.chipsalliance.cde.config.Field
 
-case object HyperDimParamsKey extends Field[HyperDimParams]
+case object HyperDimParamsKey extends Field[HyperDimParams](HyperDimParams())
 
 case class HyperDimParams(
-    numVectors: Int,
-    vectorBits: Int,
-    latency: Int,
-    opcodeSet: OpcodeSet,
-    vectorStreamerParams: VectorStreamerParams,
-    HyperDimISA32: HyperDimISA32Params,
+  vectorBits: Int = 256,
+  latency: Int = 1
 )

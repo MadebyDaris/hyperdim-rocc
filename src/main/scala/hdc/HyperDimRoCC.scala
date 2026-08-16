@@ -1,104 +1,100 @@
-package HyperDimRoCC
+package hyperdim
 
 import chisel3._
 import chisel3.util._
 
 import freechips.rocketchip.tile._
-import org.chipsalliance.cde.config._
-import freechips.rocketchip.rocket.constants.MemoryOpConstants
+import freechips.rocketchip.rocket.HellaCacheReq
+import org.chipsalliance.cde.config.Parameters
 
+import hyperdim.ops.HammingOp
+import hyperdim.mem.VectorStreamer
+import hyperdim.isa.HyperDimISA
 
-import hyperdim_rocc.mem._
-import hyperdim_rocc.ops._
-
-class HyperDimRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
-    extends LazyRoCC(opcodes) {
+class HyperDimRoCC(opcodes: OpcodeSet)(implicit p: Parameters) extends LazyRoCC(opcodes) {
+  val params = p(HyperDimParamsKey)
   override lazy val module = new HyperDimRoCCModuleImp(this)
 }
 
 class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
-    extends LazyRoCCModuleImp(outer)
-    with MemoryOpConstants {
+    extends LazyRoCCModuleImp(outer) {
 
-  val streamerA = Module(new VectorStreamer(128))
-  val streamerB = Module(new VectorStreamer(128)) 
+  val params   = outer.params
+  val numWords = params.vectorBits / 64
 
-  val hammingOp = Module(new HammingOp(128))
-  
+  val streamerA = Module(new VectorStreamer(numWords))
+  val streamerB = Module(new VectorStreamer(numWords))
+  val hammingOp = Module(new HammingOp(numWords))
+
   val cmd = Queue(io.cmd)
-  val reg_rd = Reg(chiselTypeOf(cmd.bits.inst.rd))
-  val reg_result = Reg(UInt(64.W))  
 
   object State extends ChiselEnum {
-    val s_idle, s_req_a, s_wait_a, s_req_b, s_wait_b, s_done = Value
+    val sIdle, sLoad, sRespond = Value
   }
   import State._
-  val state = RegInit(s_idle)
+  val state = RegInit(sIdle)
 
-  cmd.ready := (state === s_idle)
-  
-  // TODO: Use the length from the command
-  val test_vector_len = 4.U 
+  val respRd   = RegInit(0.U(5.W))
+  val respData = RegInit(0.U(64.W))
 
-  streamerA.io.base_addr := cmd.bits.rs1
-  streamerA.io.len       := test_vector_len
-  streamerA.io.stream_id := 0.U
-
-  streamerB.io.base_addr := cmd.bits.rs2
-  streamerB.io.len       := test_vector_len
-  streamerB.io.stream_id := 1.U
-
-  hammingOp.io.len := test_vector_len
-
-  // DATAPATH: Wire Streamers to the Math Op
   streamerA.io.out <> hammingOp.io.streamA
   streamerB.io.out <> hammingOp.io.streamB
 
-  streamerA.io.start := cmd.fire && state === s_idle
-  streamerB.io.start := cmd.fire && state === s_idle
-  hammingOp.io.start := cmd.fire && state === s_idle
+  hammingOp.io.len := numWords.U
 
-  when(cmd.fire) {
-    reg_rd := cmd.bits.inst.rd
-    state := s_streaming
-  }
+  streamerA.io.baseAddr := cmd.bits.rs1
+  streamerA.io.len      := numWords.U
+  streamerA.io.streamId := 0.U
 
-  when (state === s_streaming) {
-    when (hammingOp.io.result.valid) {
-      reg_result := hammingOp.io.result.bits
-      state := s_respond
+  streamerB.io.baseAddr := cmd.bits.rs2
+  streamerB.io.len      := numWords.U
+  streamerB.io.streamId := 1.U
+
+  val doHamming = cmd.bits.inst.funct === HyperDimISA.OP_HAMMING
+
+  streamerA.io.start := cmd.fire && doHamming
+  streamerB.io.start := cmd.fire && doHamming
+  hammingOp.io.start := cmd.fire && doHamming
+
+  val reqArb = Module(new RRArbiter(new HellaCacheReq, 2))
+  reqArb.io.in(0) <> streamerA.io.req
+  reqArb.io.in(1) <> streamerB.io.req
+  io.mem.req <> reqArb.io.out
+  streamerA.io.resp := io.mem.resp
+  streamerB.io.resp := io.mem.resp
+
+  cmd.ready := state === sIdle
+
+  when (cmd.fire) {
+    respRd := cmd.bits.inst.rd
+    when (doHamming) {
+      state := sLoad
+    }.otherwise {
+      respData := 0.U
+      state    := sRespond
     }
   }
 
-  when(state === s_respond) {
-    io.resp.valid := true.B
-    io.resp.bits.rd := reg_rd
-    io.resp.bits.data := reg_result
+  when (state === sLoad) {
+    when (hammingOp.io.result.valid) {
+      respData := hammingOp.io.result.bits
+      state    := sRespond
+    }
   }
 
-  // MEMORY: Connect Streamers to HellaCache
-  val reqArb = Module(new RRArbiter(new HellaCacheReq(p(CacheName).get.coreParams)))
-  
-  reqArb.io.in(0) <> streamerA.io.mem.req
-  reqArb.io.in(1) <> streamerB.io.mem.req
-  
-  io.mem.req <> reqArb.io.out
-  streamerA.io.mem.resp := io.mem.resp
-  streamerB.io.mem.resp := io.mem.resp
+  when (state === sRespond) {
+    when (io.resp.fire) {
+      state := sIdle
+    }
+  }
 
+  io.resp.valid     := state === sRespond
+  io.resp.bits.rd   := respRd
+  io.resp.bits.data := respData
+
+  io.busy      := state =/= sIdle
+  io.interrupt := false.B
 
   io.mem.s1_kill := false.B
   io.mem.s2_kill := false.B
-
-  // CPU WRITEBACK ENGINE
-  io.resp.bits := DontCare // Prevents FIRRTL wire errors
-
-  io.resp.valid := (state === s_respond)
-  io.resp.bits.rd := reg_rd
-  io.resp.bits.data := reg_result
-
-  when (io.resp.fire) { state := s_idle } 
-    
-  io.busy := (state =/= s_idle)
-  io.interrupt := false.B
 }

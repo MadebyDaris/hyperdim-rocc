@@ -1,14 +1,12 @@
-package HyperDimRoCC
+package hyperdim.isa
 
-import chisel3.util._
+import chisel3._
 
-object HyperDimISA32 {
-  val OP_HAMMING = 0.U
-  val OP_COSINE = 1.U
-  val OP_BIND = 2.U
-
-  val CMD_READ = 0.U
-  val CMD_WRITE = 1.U
-
-  val CMD_MEM_SIZE = 32
+object HyperDimISA {
+  val OP_HAMMING = 0.U(7.W)
+  val OP_COSINE  = 1.U(7.W)
+  val OP_BIND    = 2.U(7.W)
+  val OP_BUNDLE  = 3.U(7.W)
+  val OP_PERMUTE = 4.U(7.W)
+  val OP_DOT     = 5.U(7.W)
 }

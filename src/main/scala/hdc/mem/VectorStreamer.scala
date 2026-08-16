@@ -1,103 +1,98 @@
-package HyperDimRoCC.mem
+package hyperdim.mem
 
 import chisel3._
+import chisel3.util._
+
 import freechips.rocketchip.tile._
-import freechips.rocketchip.rocket._
+import freechips.rocketchip.rocket.{HellaCacheReq, HellaCacheResp}
+import freechips.rocketchip.rocket.constants.MemoryOpConstants
+import org.chipsalliance.cde.config.Parameters
 
-class VectorStreamer(
-  maxWords: Int = 4
-)(implicit p: Parameters) extends Module with MemoryOpConstants {
-  val maxIdxWidth = log2Ceil(maxWords)
+class VectorStreamer(maxWords: Int)(implicit p: Parameters) extends Module with MemoryOpConstants {
+  val idxBits = log2Ceil(maxWords)
+  val lenBits = log2Ceil(maxWords + 1)
+
   val io = IO(new Bundle {
-    // Control Interface
-    val start = Input(Bool())
-    val base_addr = Input(UInt(64.W))
-    val len = Input(UInt((maxIdxWidth + 1).W)) // How many words to fetch
-    val stream_id = Input(UInt(1.W))           // 0 for A, 1 for B
-    val done = Output(Bool())
+    val start    = Input(Bool())
+    val baseAddr = Input(UInt(64.W))
+    val len      = Input(UInt(lenBits.W))
+    val streamId = Input(UInt(1.W))
+    val done     = Output(Bool())
 
-    // Memory Interface
-    val mem = new HellaCacheIO
+    val req  = Decoupled(new HellaCacheReq)
+    val resp = Input(Valid(new HellaCacheResp))
 
-    // Stream Output
     val out = Decoupled(UInt(64.W))
   })
 
+  val tagBits    = io.req.bits.tag.getWidth
+  val tagIdxBits = tagBits - 1
+  require(maxWords <= (1 << tagIdxBits),
+    s"maxWords ($maxWords) exceeds tag index capacity (${1 << tagIdxBits})")
+
   object State extends ChiselEnum {
-    val s_idle, s_streaming = Value
+    val sIdle, sRun = Value
   }
   import State._
+  val state = RegInit(sIdle)
 
-  val state = RegInit(s_idle)
+  val regBase     = Reg(UInt(64.W))
+  val regLen      = Reg(UInt(lenBits.W))
+  val regStreamId = Reg(UInt(1.W))
 
-  val reg_base_addr = Reg(UInt(64.W))
-  val reg_len       = Reg(UInt((maxIdxWidth + 1).W))
-  val reg_stream_id = Reg(UInt(1.W))
+  val issueIdx  = Reg(UInt(tagIdxBits.W))
+  val commitIdx = Reg(UInt(tagIdxBits.W))
 
-  // Pointers
-  val issue_idx  = RegInit(0.U(maxIdxWidth.W))
-  val commit_idx = RegInit(0.U(maxIdxWidth.W))
+  val dataBuf  = Reg(Vec(maxWords, UInt(64.W)))
+  val validBuf = RegInit(VecInit(Seq.fill(maxWords)(false.B)))
 
-//// REORDER BUFFER (ROB)
-  val data_buf  = Reg(Vec(maxWords, UInt(64.W)))
-  val valid_buf = RegInit(VecInit(Seq.fill(maxWords)(false.B)))
+  io.req.bits := DontCare
+  io.req.bits.addr   := regBase + (issueIdx << 3.U)
+  io.req.bits.tag    := Cat(regStreamId, issueIdx)
+  io.req.bits.cmd    := M_XRD
+  io.req.bits.size   := log2Ceil(8).U
+  io.req.bits.signed := false.B
+  io.req.bits.phys   := false.B
+  io.req.bits.dprv   := 0.U(2.W)
+  io.req.bits.dv     := false.B
+  io.req.bits.no_alloc := false.B
+  io.req.bits.no_xcpt  := false.B
+  io.req.bits.no_resp  := false.B
 
-  // Start FSM
-  io.done := false.B
-  when(state === s_idle) {
-      when(io.start) {
-          reg_base_addr := io.base_addr
-          reg_len       := io.len
-          reg_stream_id := io.stream_id
-          issue_idx     := 0.U
-          commit_idx    := 0.U
-          valid_buf.foreach(_ := false.B) // Clear ROB
-          state         := s_streaming
-        }
-  } .elsewhen(state === s_streaming) {
-      when(commit_idx === reg_len && reg_len =/= 0.U) {
-        io.done := true.B
-        state := s_idle
-      }
+  io.req.valid := (state === sRun) && (issueIdx < regLen)
+  when (io.req.fire) {
+    issueIdx := issueIdx + 1.U
   }
 
-  // THE ISSUER (Fires requests blindly)
-  //
-  io.mem.req.valid := state === s_streaming && issue_idx < reg_len
-  io.mem.req.bits.addr := reg_base_addr + (issue_idx << 3.U)
-  io.mem.req.bits.cmd := M_XRD
-  io.mem.req.bits.size := log2Ceil(8).U
-  io.mem.req.bits.tag := issue_idx
-  io.mem.req.bits.signed := false.B
-  io.mem.req.bits.phys := false.B
-  
-  // Encode Tag: [Bit 7: StreamID] | [Bits 6:0: Word Index]
-  io.mem.req.bits.tag := Cat(reg_stream_id, issue_idx)
-  when(io.mem.req.fire) {
-    issue_idx := issue_idx + 1.U
+  val respStreamId = io.resp.bits.tag(tagBits - 1)
+  val respIdx      = io.resp.bits.tag(idxBits - 1, 0)
+
+  when (io.resp.valid && respStreamId === regStreamId) {
+    dataBuf(respIdx)  := io.resp.bits.data
+    validBuf(respIdx) := true.B
   }
 
-  // THE COMPLETER (Fills the ROB)
-  //
-  val resp_tag = io.mem.resp.bits.tag
-  val resp_stream_id = resp_tag(maxIdxWidth)
-  val resp_idx = resp_tag(maxIdxWidth - 1, 0)
+  val readIdx = commitIdx(idxBits - 1, 0)
 
-  when(io.mem.resp.fire) {
-    when(resp_stream_id === reg_stream_id) {
-        data_buf(resp_idx) := io.mem.resp.bits.data
-        valid_buf(resp_idx) := true.B
+  io.out.valid := (state === sRun) && (commitIdx < regLen) && validBuf(readIdx)
+  io.out.bits  := dataBuf(readIdx)
+  when (io.out.fire) {
+    commitIdx := commitIdx + 1.U
+  }
+
+  io.done := (state === sRun) && (commitIdx === regLen)
+
+  when (state === sIdle) {
+    when (io.start) {
+      regBase     := io.baseAddr
+      regLen      := io.len
+      regStreamId := io.streamId
+      issueIdx    := 0.U
+      commitIdx   := 0.U
+      validBuf.foreach(_ := false.B)
+      state := sRun
     }
+  }.elsewhen (io.done) {
+    state := sIdle
   }
-
-  // THE EXITER (Sends data to consumer)
-  //
-  io.out.valid := valid_buf(commit_idx) || valid_buf(commit_idx + 1.U)
-  io.out.bits := data_buf(commit_idx) || data_buf(commit_idx + 1.U)
-  when(io.out.fire) {
-    commit_idx := commit_idx + 1.U
-  }
-
-  io.mem.s1_kill := false.B
-  io.mem.s2_kill := false.B
 }

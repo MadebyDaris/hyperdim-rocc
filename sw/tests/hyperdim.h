@@ -1,0 +1,18 @@
+#ifndef HYPERDIM_H
+#define HYPERDIM_H
+
+#include "rocc.h"
+
+#define HYPERDIM_CUSTOM 0
+
+#define HYPERDIM_OP_HAMMING 0
+#define HYPERDIM_OP_COSINE  1
+#define HYPERDIM_OP_BIND    2
+#define HYPERDIM_OP_BUNDLE  3
+#define HYPERDIM_OP_PERMUTE 4
+#define HYPERDIM_OP_DOT     5
+
+#define HYPERDIM_HAMMING(rd, rs1, rs2) \
+    ROCC_INSTRUCTION_DSS(HYPERDIM_CUSTOM, rd, rs1, rs2, HYPERDIM_OP_HAMMING)
+
+#endif
