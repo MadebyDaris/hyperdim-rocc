@@ -7,7 +7,7 @@
 // rs1 = query vector pointer
 // rs2 = class vector pointer
 #define HYPERDIM_ROCC(rd, rs1, rs2) \
-    ROCC_INSTRUCTION_R_R_R(0, rd, rs1, rs2, 0)
+    ROCC_INSTRUCTION_DSS(0, rd, rs1, rs2, 0)
 
 // Helper to read CPU cycle counter
 static inline uint64_t read_cycles() {
