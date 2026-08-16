@@ -7,94 +7,98 @@ import freechips.rocketchip.tile._
 import org.chipsalliance.cde.config._
 import freechips.rocketchip.rocket.constants.MemoryOpConstants
 
-// Made this a class param instead of a magic number so it's easy to
-// bump when you move to real hypervector dimensions later.
-class HyperDimRoCC(opcodes: OpcodeSet, numWords: Int = 4)(implicit p: Parameters)
+
+import hyperdim_rocc.mem._
+import hyperdim_rocc.ops._
+
+class HyperDimRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
     extends LazyRoCC(opcodes) {
-  override lazy val module = new HyperDimRoCCModuleImp(this, numWords)
+  override lazy val module = new HyperDimRoCCModuleImp(this)
 }
 
-class HyperDimRoCCModuleImp(outer: HyperDimRoCC, numWords: Int)
+class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
     extends LazyRoCCModuleImp(outer)
     with MemoryOpConstants {
 
+  val streamerA = Module(new VectorStreamer(128))
+  val streamerB = Module(new VectorStreamer(128)) 
+
+  val hammingOp = Module(new HammingOp(128))
+  
   val cmd = Queue(io.cmd)
-
-  val ptr_a = Reg(UInt(64.W))
-  val ptr_b = Reg(UInt(64.W))
-  val count = RegInit(0.U(log2Ceil(numWords).W))
-  val accum = RegInit(0.U(64.W))
-  val word_a = Reg(UInt(64.W))
-
-  // FIX: latch rd (and anything else from cmd.bits you need after dequeue)
-  // at accept time. cmd.bits is only valid for the currently-queued entry;
-  // it can change out from under you the instant cmd.fire dequeues it.
-  val resp_rd = Reg(UInt(5.W))
+  val reg_rd = Reg(chiselTypeOf(cmd.bits.inst.rd))
+  val reg_result = Reg(UInt(64.W))  
 
   object State extends ChiselEnum {
     val s_idle, s_req_a, s_wait_a, s_req_b, s_wait_b, s_done = Value
   }
   import State._
-
   val state = RegInit(s_idle)
 
   cmd.ready := (state === s_idle)
+  
+  // TODO: Use the length from the command
+  val test_vector_len = 4.U 
+
+  streamerA.io.base_addr := cmd.bits.rs1
+  streamerA.io.len       := test_vector_len
+  streamerA.io.stream_id := 0.U
+
+  streamerB.io.base_addr := cmd.bits.rs2
+  streamerB.io.len       := test_vector_len
+  streamerB.io.stream_id := 1.U
+
+  hammingOp.io.len := test_vector_len
+
+  // DATAPATH: Wire Streamers to the Math Op
+  streamerA.io.out <> hammingOp.io.streamA
+  streamerB.io.out <> hammingOp.io.streamB
+
+  streamerA.io.start := cmd.fire && state === s_idle
+  streamerB.io.start := cmd.fire && state === s_idle
+  hammingOp.io.start := cmd.fire && state === s_idle
 
   when(cmd.fire) {
-    ptr_a := cmd.bits.rs1
-    ptr_b := cmd.bits.rs2
-    resp_rd := cmd.bits.inst.rd // <-- latched now, not read later
-    count := 0.U
-    accum := 0.U
-    state := s_req_a
+    reg_rd := cmd.bits.inst.rd
+    state := s_streaming
   }
 
-  // FIX: default-init the whole bundle first so every field of
-  // HellaCacheReq is driven, regardless of rocket-chip version /
-  // which extra fields it happens to carry (dprv, dv, no_alloc, ...).
-  io.mem.req.bits := DontCare
-  io.mem.req.valid := (state === s_req_a) || (state === s_req_b)
-  io.mem.req.bits.addr := Mux(
-    state === s_req_a,
-    ptr_a + (count << 3.U),
-    ptr_b + (count << 3.U)
-  )
-  io.mem.req.bits.cmd := M_XRD
-  io.mem.req.bits.size := log2Ceil(8).U
-  io.mem.req.bits.tag := 0.U
-  io.mem.req.bits.signed := false.B
-  io.mem.req.bits.phys := false.B
-
-  when(io.mem.req.fire && state === s_req_a) { state := s_wait_a }
-  when(io.mem.req.fire && state === s_req_b) { state := s_wait_b }
-
-  when(io.mem.resp.valid) {
-    when(state === s_wait_a) {
-      word_a := io.mem.resp.bits.data
-      state := s_req_b
-    }
-    when(state === s_wait_b) {
-      val word_b = io.mem.resp.bits.data
-      val xor_val = word_a ^ word_b
-      accum := accum + PopCount(xor_val)
-
-      when(count === (numWords - 1).U) {
-        state := s_done
-      }.otherwise {
-        count := count + 1.U
-        state := s_req_a
-      }
+  when (state === s_streaming) {
+    when (hammingOp.io.result.valid) {
+      reg_result := hammingOp.io.result.bits
+      state := s_respond
     }
   }
 
-  // FIX: default-init response bundle too.
-  io.resp.bits := DontCare
-  io.resp.valid := (state === s_done)
-  io.resp.bits.rd := resp_rd // <-- use latched value, not cmd.bits.inst.rd
-  io.resp.bits.data := accum
+  when(state === s_respond) {
+    io.resp.valid := true.B
+    io.resp.bits.rd := reg_rd
+    io.resp.bits.data := reg_result
+  }
 
-  when(io.resp.fire) { state := s_idle }
+  // MEMORY: Connect Streamers to HellaCache
+  val reqArb = Module(new RRArbiter(new HellaCacheReq(p(CacheName).get.coreParams)))
+  
+  reqArb.io.in(0) <> streamerA.io.mem.req
+  reqArb.io.in(1) <> streamerB.io.mem.req
+  
+  io.mem.req <> reqArb.io.out
+  streamerA.io.mem.resp := io.mem.resp
+  streamerB.io.mem.resp := io.mem.resp
 
+
+  io.mem.s1_kill := false.B
+  io.mem.s2_kill := false.B
+
+  // CPU WRITEBACK ENGINE
+  io.resp.bits := DontCare // Prevents FIRRTL wire errors
+
+  io.resp.valid := (state === s_respond)
+  io.resp.bits.rd := reg_rd
+  io.resp.bits.data := reg_result
+
+  when (io.resp.fire) { state := s_idle } 
+    
   io.busy := (state =/= s_idle)
   io.interrupt := false.B
 }
