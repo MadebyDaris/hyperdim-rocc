@@ -2,7 +2,7 @@
 
 A custom Rocket Custom Coprocessor (RoCC) generator for the [Chipyard](https://github.com/ucb-bar/chipyard) framework.
 
-This project implements a hardware accelerator for Hyperdimensional Computing (HDC) operations. It efficiently computes the Hamming Distance (XOR + Popcount) between two memory-resident hypervectors, streaming data directly from the L1 data cache.
+This project implements a hardware accelerator for Hyperdimensional Computing (HDC) operations. It computes the Hamming Distance (XOR + Popcount) between two memory-resident hypervectors, and can classify a query hypervector against a whole associative memory of class hypervectors in a single instruction (`OP_AM_SEARCH`), streaming data directly from the L1 data cache.
 
 ## Directory Structure
 
@@ -11,19 +11,21 @@ src/main/scala/
   config/Configs.scala       — Chipyard config fragment (WithHyperDimRoCC)
   hdc/
     HyperDimParams.scala     — Parameter case class + CDE key
-    HyperDimRoCC.scala       — LazyRoCC wrapper + module FSM
+    HyperDimRoCC.scala       — LazyRoCC wrapper + module FSM + config regs
     isa/HyperDimISA.scala    — funct opcode constants
     ops/
       OpIO.scala             — shared streaming op interface
       HammingOp.scala        — Hamming distance datapath
+      AmSearchOp.scala       — nearest-class (argmin Hamming) search
       *.scala                — reserved for future ops
     mem/
-      VectorStreamer.scala   — L1$ streaming engine with reorder buffer
+      VectorStreamer.scala   — L1$ streaming engine (windowed, reorder buffer)
       VectorWriter.scala     — reserved
 sw/tests/
     rocc.h                   — standard RoCC instruction macros
     hyperdim.h               — HDC-specific ISA constants + macros
-    main.c                   — bare-metal test program
+    main.c                   — bare-metal Hamming test program
+    am_search_test.c         — bare-metal AM search (classification) test
     Makefile
 docs/
     setup.md                 — Fedora/Chipyard environment setup guide
@@ -47,11 +49,29 @@ class HyperDimRoCCConfig extends Config(
 )
 ```
 
+For larger hypervectors (e.g. a 10,000-dim encoder padded to 157 words):
+
+```scala
+new hyperdim.WithHyperDimRoCC(HyperDimParams(vectorBits = 10048))
+```
+
+## ISA
+
+The accelerator uses the `custom0` opcode. The 7-bit `funct` field selects the operation.
+
+| funct | Operation |
+|-------|-----------|
+| `0` | `OP_HAMMING` — `rd = hamming(rs1, rs2)` |
+| `6` | `OP_SETCFG` — set words-per-vector (`rs1`) and class count (`rs2`) |
+| `7` | `OP_AM_SEARCH` — `rd = argmin_i hamming(rs1, AM + i·vecBytes)` (rs2 = AM base) |
+
+Vector length was compile-time only; it is now a runtime config register set by `OP_SETCFG` (default: elaborated `vectorBits`/64 words). See `docs/architecture.md` for the full walkthrough.
+
 ## Software and Testing
 
-A bare-metal C test is provided in `sw/tests/`. It sends a custom instruction to the accelerator and checks the result.
+Bare-metal C tests are provided in `sw/tests/`: `main.c` checks the Hamming op, `am_search_test.c` classifies a query against 3 class hypervectors with `OP_AM_SEARCH`.
 
-### Building the Test
+### Building the Tests
 
 Requires `riscv64-unknown-elf-gcc` (included in the Chipyard conda environment).
 
@@ -60,9 +80,9 @@ cd sw/tests
 make
 ```
 
-This produces `hyperdim_test.riscv`.
+This produces `hyperdim_test.riscv` and `am_search_test.riscv`.
 
-### Running the Test
+### Running the Tests
 
 Build the Verilator simulator for the config that includes the accelerator:
 
@@ -71,16 +91,8 @@ cd sims/verilator
 make CONFIG=HyperDimRoCCConfig
 ```
 
-Run the test binary:
+Run a test binary:
 
 ```bash
-make CONFIG=HyperDimRoCCConfig run-binary BINARY=../../generators/hyperdim-rocc/sw/tests/hyperdim_test.riscv
+make CONFIG=HyperDimRoCCConfig run-binary BINARY=../../generators/hyperdim-rocc/sw/tests/am_search_test.riscv
 ```
-
-## ISA
-
-The accelerator uses the `custom0` opcode. The 7-bit `funct` field selects the operation.
-
-The instruction takes two source registers (base addresses of vectors A and B) and returns the Hamming distance in the destination register. Vector length is fixed at elaboration time (default: 256 bits = 4 × 64-bit words).
-
-See `docs/architecture.md` for a detailed walkthrough of the design.

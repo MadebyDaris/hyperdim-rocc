@@ -1,13 +1,15 @@
 CC = riscv64-unknown-elf-gcc
 CFLAGS = -O2 -static -std=gnu99 -Wall
 
-TARGET = hyperdim_test.riscv
+TARGETS = hyperdim_test.riscv am_search_test.riscv
 HEADERS = rocc.h hyperdim.h
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): main.c $(HEADERS)
+hyperdim_test.riscv: main.c $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ main.c
 
+am_search_test.riscv: am_search_test.c $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ am_search_test.c
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
