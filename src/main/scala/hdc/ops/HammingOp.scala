@@ -8,6 +8,10 @@ import chisel3.util._
  *
  * Consumes `len` words from each stream, XORs them word-by-word, and
  * accumulates the popcount. Pulses `result` for one cycle when done.
+ *
+ * The accumulator is 64 bits wide: worst-case distance is bounded by the
+ * maximum runtime `len` × 64, which fits comfortably in 64 bits for any
+ * practical hypervector dimension (e.g. 10000 bits → max dist 10000 < 2^14).
  */
 class HammingOp extends Module {
   val io = IO(new OpIO)

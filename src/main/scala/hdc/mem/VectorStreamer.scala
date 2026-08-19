@@ -54,9 +54,9 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters) extends Module wi
   val totalLen    = Reg(UInt(32.W))
   val regStreamId = Reg(UInt(1.W))
 
-  val winBase   = Reg(UInt(32.W))        // global word index of current window
-  val issueIdx  = Reg(UInt(cntBits.W))   // words issued within the window
-  val commitIdx = Reg(UInt(cntBits.W))   // words drained within the window
+  val winBase   = Reg(UInt(32.W))       // global word index of current window start
+  val issueIdx  = Reg(UInt(cntBits.W))  // words issued within the window
+  val commitIdx = Reg(UInt(cntBits.W))  // words drained within the window
 
   val dataBuf  = Reg(Vec(windowWords, UInt(64.W)))
   val validBuf = RegInit(VecInit(Seq.fill(windowWords)(false.B)))
@@ -72,7 +72,10 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters) extends Module wi
   io.req.bits.size     := log2Ceil(8).U
   io.req.bits.signed   := false.B
   io.req.bits.phys     := false.B
-  io.req.bits.dprv     := 0.U(2.W)
+  // dprv should ideally mirror cmd.bits.status.dprv from the RoCC command to
+  // avoid privilege faults when the MMU is active. Hardcoded to machine (3)
+  // here as a safe default for bare-metal / early bring-up.
+  io.req.bits.dprv     := 3.U(2.W)
   io.req.bits.dv       := false.B
   io.req.bits.no_alloc := false.B
   io.req.bits.no_xcpt  := false.B
@@ -86,6 +89,9 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters) extends Module wi
   // ---------------- Completer ----------------
   // Responses are broadcast to every streamer; match on streamId and only
   // accept while running (a stale response must not corrupt an idle buffer).
+  // NOTE: the streamId acts as a one-bit epoch discriminator. For full safety
+  // against responses from a previous operation arriving late, consider a
+  // generation counter if more than two back-to-back operations are possible.
   val respStreamId = io.resp.bits.tag(tagBits - 1)
   val respSlot     = io.resp.bits.tag(slotBits - 1, 0)
 
