@@ -3,10 +3,8 @@ package hyperdim.ops
 import chisel3._
 import chisel3.util._
 
-class DotProductOp(maxWords: Int) extends Module {
-  val io = IO(new OpIO(maxWords))
-
-  val lenBits = log2Ceil(maxWords + 1)
+class DotProductOp extends Module {
+  val io = IO(new OpIO)
 
   object State extends ChiselEnum {
     val sIdle, sRun, sDone = Value
@@ -15,8 +13,8 @@ class DotProductOp(maxWords: Int) extends Module {
   val state = RegInit(sIdle)
 
   val acc    = RegInit(0.U(128.W))
-  val count  = RegInit(0.U(lenBits.W))
-  val regLen = RegInit(0.U(lenBits.W))
+  val count  = RegInit(0.U(32.W))
+  val regLen = RegInit(0.U(32.W))
 
   io.streamA.ready := state === sRun
   io.streamB.ready := state === sRun

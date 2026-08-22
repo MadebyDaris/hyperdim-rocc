@@ -1,3 +1,3 @@
 package hyperdim.mem
 
-import chise
+import chisel3._

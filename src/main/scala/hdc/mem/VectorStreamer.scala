@@ -8,41 +8,45 @@ import freechips.rocketchip.rocket.{HellaCacheReq, HellaCacheResp}
 import freechips.rocketchip.rocket.constants.MemoryOpConstants
 import org.chipsalliance.cde.config.Parameters
 
-/**
- * VectorStreamer
- *
- * Streams `len` consecutive 64-bit words starting at `baseAddr` and emits
- * them in order on `io.out`.
- *
- * Requests are issued in windows of at most `windowWords` words: the reorder
- * buffer has one slot per window word and the cache tag encodes only
- * {streamId, slot}, so a window must be fully drained before the next one is
- * issued. Responses within a window may complete out of order. Streaming an
- * arbitrarily long region (e.g. a whole associative memory) therefore works
- * with a small, tag-bounded reorder buffer.
- */
-class VectorStreamer(windowWords: Int)(implicit p: Parameters) extends Module with MemoryOpConstants {
+/** VectorStreamer
+  *
+  * Streams `len` consecutive 64-bit words starting at `baseAddr` and emits them
+  * in order on `io.out`.
+  *
+  * Requests are issued in windows of at most `windowWords` words: the reorder
+  * buffer has one slot per window word and the cache tag encodes only
+  * {streamId, slot}, so a window must be fully drained before the next one is
+  * issued. Responses within a window may complete out of order. Streaming an
+  * arbitrarily long region (e.g. a whole associative memory) therefore works
+  * with a small, tag-bounded reorder buffer.
+  */
+class VectorStreamer(windowWords: Int)(implicit p: Parameters)
+    extends Module
+    with MemoryOpConstants {
   require(windowWords > 1, "windowWords must be at least 2")
 
   val slotBits = log2Ceil(windowWords)
-  val cntBits  = log2Ceil(windowWords + 1)
+  val cntBits = log2Ceil(windowWords + 1)
 
   val io = IO(new Bundle {
-    val start    = Input(Bool())
+    val start = Input(Bool())
     val baseAddr = Input(UInt(64.W))
-    val len      = Input(UInt(32.W))   // total words to stream
+    val len = Input(UInt(32.W)) // total words to stream
     val streamId = Input(UInt(1.W))
-    val done     = Output(Bool())
+    val done = Output(Bool())
 
-    val req  = Decoupled(new HellaCacheReq)
-    val resp = Input(Valid(new HellaCacheResp))
+    val req = Decoupled(new HellaCacheReq) // cache coherence unit: 64-bit word
+    val resp =
+      Input(Valid(new HellaCacheResp)) // cache coherence unit: 64-bit word
 
     val out = Decoupled(UInt(64.W))
   })
 
   val tagBits = io.req.bits.tag.getWidth
-  require(windowWords <= (1 << (tagBits - 1)),
-    s"windowWords ($windowWords) exceeds tag index capacity (${1 << (tagBits - 1)})")
+  require(
+    windowWords <= (1 << (tagBits - 1)),
+    s"windowWords ($windowWords) exceeds tag index capacity (${1 << (tagBits - 1)})"
+  )
 
   object State extends ChiselEnum {
     val sIdle, sRun = Value
@@ -50,86 +54,93 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters) extends Module wi
   import State._
   val state = RegInit(sIdle)
 
-  val regBase     = Reg(UInt(64.W))
-  val totalLen    = Reg(UInt(32.W))
+  val regBase = Reg(UInt(64.W))
+  val totalLen = Reg(UInt(32.W))
   val regStreamId = Reg(UInt(1.W))
 
-  val winBase   = Reg(UInt(32.W))       // global word index of current window start
-  val issueIdx  = Reg(UInt(cntBits.W))  // words issued within the window
-  val commitIdx = Reg(UInt(cntBits.W))  // words drained within the window
+  val winBase = Reg(UInt(32.W)) // global word index of current window start
+  val issueIdx = Reg(UInt(cntBits.W)) // words issued within the window
+  val commitIdx = Reg(UInt(cntBits.W)) // words drained within the window
 
-  val dataBuf  = Reg(Vec(windowWords, UInt(64.W)))
+  val dataBuf = Reg(Vec(windowWords, UInt(64.W)))
   val validBuf = RegInit(VecInit(Seq.fill(windowWords)(false.B)))
 
   val remaining = totalLen - winBase
-  val winSize   = Mux(remaining >= windowWords.U, windowWords.U, remaining)
+  val winSize = Mux(remaining >= windowWords.U, windowWords.U, remaining)
+  // number of words in current window (saturates at windowWords)
 
   // ---------------- Issuer ----------------
   io.req.bits := DontCare
-  io.req.bits.addr     := regBase + ((winBase + issueIdx) << 3.U)
-  io.req.bits.tag      := Cat(regStreamId, issueIdx(slotBits - 1, 0))
-  io.req.bits.cmd      := M_XRD
-  io.req.bits.size     := log2Ceil(8).U
-  io.req.bits.signed   := false.B
-  io.req.bits.phys     := false.B
-  // dprv should ideally mirror cmd.bits.status.dprv from the RoCC command to
-  // avoid privilege faults when the MMU is active. Hardcoded to machine (3)
-  // here as a safe default for bare-metal / early bring-up.
-  io.req.bits.dprv     := 3.U(2.W)
-  io.req.bits.dv       := false.B
+  // byte address in memory to fetch the next word
+  io.req.bits.addr := regBase + ((winBase + issueIdx) << 3.U)
+  // tag = stream ID + index within the window concatenate bit fields
+  io.req.bits.tag := Cat(regStreamId, issueIdx(slotBits - 1, 0))
+  io.req.bits.cmd := M_XRD
+  io.req.bits.size := log2Ceil(8).U
+  io.req.bits.signed := false.B
+  io.req.bits.phys := false.B
+  // dprv: privilege level
+  io.req.bits.dprv := 3.U(2.W)
+  // dv: valid bit for dprv (we keep it false)
+  io.req.bits.dv := false.B
+
+  // disable cache allocation and exceptions
+  // no_alloc: don't allocate in TLB
   io.req.bits.no_alloc := false.B
-  io.req.bits.no_xcpt  := false.B
-  io.req.bits.no_resp  := false.B
+  // no_xcpt: don't raise exception
+  io.req.bits.no_xcpt := false.B
+  // no_resp: don't send response
+  io.req.bits.no_resp := false.B
 
   io.req.valid := (state === sRun) && (issueIdx < winSize)
-  when (io.req.fire) {
+  when(io.req.fire) {
     issueIdx := issueIdx + 1.U
   }
 
   // ---------------- Completer ----------------
   // Responses are broadcast to every streamer; match on streamId and only
   // accept while running (a stale response must not corrupt an idle buffer).
-  // NOTE: the streamId acts as a one-bit epoch discriminator. For full safety
-  // against responses from a previous operation arriving late, consider a
-  // generation counter if more than two back-to-back operations are possible.
-  val respStreamId = io.resp.bits.tag(tagBits - 1)
-  val respSlot     = io.resp.bits.tag(slotBits - 1, 0)
 
-  when ((state === sRun) && io.resp.valid && (respStreamId === regStreamId)) {
-    dataBuf(respSlot)  := io.resp.bits.data
+  val respStreamId = io.resp.bits.tag(tagBits - 1)
+  val respSlot = io.resp.bits.tag(slotBits - 1, 0)
+
+  when((state === sRun) && io.resp.valid && (respStreamId === regStreamId)) {
+    dataBuf(respSlot) := io.resp.bits.data
     validBuf(respSlot) := true.B
   }
 
   // ---------------- Drainer ----------------
-  val winDrained = commitIdx === winSize
+  val winDrained = commitIdx === winSize // window is fully drained
   val lastWindow = (winBase + winSize) === totalLen
 
-  io.out.valid := (state === sRun) && !winDrained && validBuf(commitIdx(slotBits - 1, 0))
-  io.out.bits  := dataBuf(commitIdx(slotBits - 1, 0))
-  when (io.out.fire) {
+  io.out.valid := (state === sRun) && !winDrained && validBuf(
+    commitIdx(slotBits - 1, 0)
+  )
+  io.out.bits := dataBuf(commitIdx(slotBits - 1, 0))
+  when(io.out.fire) {
     commitIdx := commitIdx + 1.U
   }
 
   io.done := (state === sRun) && winDrained && lastWindow
 
   // ---------------- Window control ----------------
-  when (state === sIdle) {
-    when (io.start) {
-      regBase     := io.baseAddr
-      totalLen    := io.len
+  when(state === sIdle) {
+    when(io.start) {
+      regBase := io.baseAddr
+      totalLen := io.len
       regStreamId := io.streamId
-      winBase     := 0.U
-      issueIdx    := 0.U
-      commitIdx   := 0.U
+      winBase := 0.U
+      issueIdx := 0.U
+      commitIdx := 0.U
       validBuf.foreach(_ := false.B)
       state := sRun
     }
-  }.elsewhen (io.done) {
+  }.elsewhen(io.done) {
     state := sIdle
-  }.elsewhen (winDrained) {
+  }.elsewhen(winDrained) {
     // Window fully drained with words remaining: slide to the next window.
-    winBase   := winBase + winSize
-    issueIdx  := 0.U
+    winBase := winBase + winSize
+    issueIdx := 0.U
     commitIdx := 0.U
     validBuf.foreach(_ := false.B)
   }

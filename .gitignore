@@ -2,3 +2,15 @@
 .vscode
 target
 backup/
+
+# RISC-V outputs
+*.riscv
+*.hex
+*.elf
+
+# Simulation outputs
+*.out
+*.log
+*.dump
+*.vcd
+*.gtkw
