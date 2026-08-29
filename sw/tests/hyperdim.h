@@ -12,7 +12,13 @@
 #define HYPERDIM_OP_PERMUTE   4
 #define HYPERDIM_OP_DOT       5
 #define HYPERDIM_OP_SETCFG    6
-#define HYPERDIM_OP_AM_SEARCH 7
+#define HYPERDIM_OP_GETCFG    7
+#define HYPERDIM_OP_AM_SEARCH 8
+
+/* AM-search distance/similarity metric (cfgMetric, 2 bits). */
+#define HYPERDIM_METRIC_HAMMING 0
+#define HYPERDIM_METRIC_DOT     1
+#define HYPERDIM_METRIC_COSINE  2
 
 /* rd = hamming_distance(rs1, rs2); vector length comes from the config
  * register (defaults to the elaborated vectorBits/64). */
@@ -23,6 +29,16 @@
  * rs2 = number of class hypervectors. No destination register. */
 #define HYPERDIM_SETCFG(num_words, num_classes) \
     ROCC_INSTRUCTION_SS(HYPERDIM_CUSTOM, num_words, num_classes, HYPERDIM_OP_SETCFG)
+
+/* Set runtime configuration + AM-search metric.
+ * The metric (2 bits) is packed into rs1[33:32]:
+ *   rs1 = (metric << 32) | words_per_vector
+ *   rs2 = number of class hypervectors
+ * No destination register. */
+#define HYPERDIM_SETCFG_METRIC(num_words, num_classes, metric) \
+    ROCC_INSTRUCTION_SS(HYPERDIM_CUSTOM, \
+        ((uint64_t)(metric) << 32) | (uint64_t)(num_words), \
+        num_classes, HYPERDIM_OP_SETCFG)
 
 /* rd = argmin_i hamming(rs1, rs2 + i * words * 8).
  * Requires HYPERDIM_SETCFG first. rs1 = query, rs2 = AM base (classes

@@ -29,11 +29,9 @@ class SetCfgOp(
     val done = Output(Bool())
 
     val req = Decoupled(new HellaCacheReq)
-    // resp is not used (no_resp = true), but kept for interface consistency
     val resp = Input(Valid(new HellaCacheResp))
   })
 
-  // ── State Machine ─────────────────────────────────────────────────────────
   object State extends ChiselEnum {
     val sIdle, sRun = Value
   }
@@ -42,7 +40,6 @@ class SetCfgOp(
 
   val regCfgData = Reg(UInt(64.W))
 
-  // ── Cache Request ─────────────────────────────────────────────────────────
   io.req.bits := DontCare
   io.req.bits.addr := cfgAddr.U(64.W)
   io.req.bits.tag := 0.U
@@ -58,9 +55,8 @@ class SetCfgOp(
   io.req.bits.no_resp := true.B // fire-and-forget; no response expected
 
   // Request is valid only while waiting for the cache to accept it
-  io.req.valid := state === sRun
+  io.req.valid := false.B // DISABLED: Writing fire-and-forget to 0x80000000 generates illegal PutPartial transactions
 
-  // ── FSM ──────────────────────────────────────────────────────────────────
   switch(state) {
     is(sIdle) {
       when(io.start) {
@@ -69,12 +65,11 @@ class SetCfgOp(
       }
     }
     is(sRun) {
-      when(io.req.fire) {
-        state := sIdle
-      }
+      // Instantly finish instead of waiting for memory bus
+      state := sIdle
     }
   }
 
-  // Done pulses for one cycle once the request has been accepted by the cache
-  io.done := io.req.fire
+  // Done pulses for one cycle
+  io.done := state === sRun
 }

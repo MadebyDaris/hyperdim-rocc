@@ -73,8 +73,14 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters)
   io.req.bits := DontCare
   // byte address in memory to fetch the next word
   io.req.bits.addr := regBase + ((winBase + issueIdx) << 3.U)
-  // tag = stream ID + index within the window concatenate bit fields
-  io.req.bits.tag := Cat(regStreamId, issueIdx(slotBits - 1, 0))
+  // tag = { streamId (MSB), zero-pad, issueIdx slot (LSBs) }.
+  // Must be packed explicitly to the full tag width so the stream-ID bit
+  // lands at io.req.bits.tag.getWidth-1 (the completer reads resp.tag(MSB)).
+  io.req.bits.tag := Cat(
+    regStreamId,
+    0.U((tagBits - slotBits - 1).W),
+    issueIdx(slotBits - 1, 0)
+  )
   io.req.bits.cmd := M_XRD
   io.req.bits.size := log2Ceil(8).U
   io.req.bits.signed := false.B

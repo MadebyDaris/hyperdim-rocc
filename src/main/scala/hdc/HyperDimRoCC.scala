@@ -37,7 +37,7 @@ class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
   val hammingOp = Module(new HammingOp)
   // val dotProductOp = Module(new DotProductOp)
   // val cosineOp = Module(new CosineOp)
-  val amSearchOp = Module(new AmSearchOp(maxQueryWords))
+  val amSearchOp = Module(new AmSearchOp(maxQueryWords, params.numClasses))
   val setCfgOp = Module(new SetCfgOp)
   setCfgOp.io.resp := DontCare
 
@@ -198,4 +198,12 @@ class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
 
   io.mem.s1_kill := false.B
   io.mem.s2_kill := false.B
+
+  val dbgPrev = RegNext(state)
+  when(state =/= dbgPrev) {
+    printf("[RoCC] %d -> %d funct=%d aOutV=%d aReqV=%d aOutR=%d bOutV=%d bReqV=%d\n",
+      dbgPrev.asUInt, state.asUInt, funct,
+      streamerA.io.out.valid, streamerA.io.req.valid, streamerA.io.out.ready,
+      streamerB.io.out.valid, streamerB.io.req.valid)
+  }
 }
