@@ -14,6 +14,9 @@ HEADERS = rocc.h hyperdim.h
 
 all: $(TARGETS)
 
+hyperdim_test.riscv: main.c $(HEADERS) htif.ld
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 %.riscv: %.c $(HEADERS) htif.ld
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 

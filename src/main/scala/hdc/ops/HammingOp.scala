@@ -26,8 +26,14 @@ class HammingOp extends Module {
   val count  = RegInit(0.U(32.W))
   val regLen = RegInit(0.U(32.W))
 
-  io.streamA.ready := state === sRun
-  io.streamB.ready := state === sRun
+  // Both streams must be consumed in lockstep: if either stream's `ready`
+  // were unconditional, the two VectorStreamers (independent addresses,
+  // independent arbitration timing) could drain at different rates, one
+  // finishing (and going idle, valid permanently false) before the other
+  // -- after which `fire` could never be true again, deadlocking sRun.
+  val bothValid = io.streamA.valid && io.streamB.valid
+  io.streamA.ready := (state === sRun) && bothValid
+  io.streamB.ready := (state === sRun) && bothValid
 
   val fire = io.streamA.fire && io.streamB.fire
 

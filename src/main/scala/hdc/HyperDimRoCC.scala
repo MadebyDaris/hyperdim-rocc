@@ -4,11 +4,11 @@ import chisel3._
 import chisel3.util._
 
 import freechips.rocketchip.tile._
-import freechips.rocketchip.rocket.HellaCacheReq
+import freechips.rocketchip.rocket.constants.MemoryOpConstants
 import org.chipsalliance.cde.config.Parameters
 
 import hyperdim.ops.{AmSearchOp, HammingOp, CosineOp, DotProductOp, SetCfgOp}
-import hyperdim.mem.VectorStreamer
+import hyperdim.mem.{StreamReq, StreamResp, VectorStreamer}
 import hyperdim.isa.HyperDimISA
 
 class HyperDimRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
@@ -18,11 +18,12 @@ class HyperDimRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
 }
 
 class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
-    extends LazyRoCCModuleImp(outer) {
+    extends LazyRoCCModuleImp(outer) with MemoryOpConstants {
 
   val params = outer.params
   val maxQueryWords = params.vectorBits / 64
   val streamWords = params.streamWords
+  val tagBits = io.mem.req.bits.tag.getWidth
 
   // Configuration registers (written by OP_SETCFG)
   //   cfgWords      -- 64-bit words per hypervector (runtime length)
@@ -32,8 +33,8 @@ class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
   val cfgMetric = RegInit(0.U(2.W))
 
   // Submodules
-  val streamerA = Module(new VectorStreamer(streamWords))
-  val streamerB = Module(new VectorStreamer(streamWords))
+  val streamerA = Module(new VectorStreamer(streamWords, tagBits))
+  val streamerB = Module(new VectorStreamer(streamWords, tagBits))
   val hammingOp = Module(new HammingOp)
   // val dotProductOp = Module(new DotProductOp)
   // val cosineOp = Module(new CosineOp)
@@ -187,14 +188,41 @@ class HyperDimRoCCModuleImp(outer: HyperDimRoCC)(implicit p: Parameters)
 
   // --------------------------------------------------------------------
   // Shared cache port
+  //
+  // io.mem is already wrapped in its own SimpleHellaCacheIF (with replay
+  // and nack handling) by the framework in HasLazyRoCCModule, so it can be
+  // driven directly here -- wrapping it in a second SimpleHellaCacheIF
+  // double-buffers requests/responses and deadlocks the accelerator as
+  // soon as it issues real memory traffic.
   // --------------------------------------------------------------------
-  val reqArb = Module(new RRArbiter(new HellaCacheReq, 3))
+  // setCfgOp never issues a request (its valid is tied low), so it is not arbitrated.
+  setCfgOp.io.req.ready := false.B
+
+  val reqArb = Module(new RRArbiter(new StreamReq(tagBits), 2))
   reqArb.io.in(0) <> streamerA.io.req
   reqArb.io.in(1) <> streamerB.io.req
-  reqArb.io.in(2) <> setCfgOp.io.req
-  io.mem.req <> reqArb.io.out
-  streamerA.io.resp := io.mem.resp
-  streamerB.io.resp := io.mem.resp
+
+  io.mem.req.valid := reqArb.io.out.valid
+  reqArb.io.out.ready := io.mem.req.ready
+  io.mem.req.bits := DontCare
+  io.mem.req.bits.addr := reqArb.io.out.bits.addr
+  io.mem.req.bits.tag := reqArb.io.out.bits.tag
+  io.mem.req.bits.cmd := M_XRD
+  io.mem.req.bits.size := log2Ceil(8).U
+  io.mem.req.bits.signed := false.B
+  io.mem.req.bits.phys := false.B
+  io.mem.req.bits.dprv := 3.U(2.W)
+  io.mem.req.bits.dv := false.B
+  io.mem.req.bits.no_resp := false.B
+  io.mem.req.bits.no_alloc := false.B
+  io.mem.req.bits.no_xcpt := false.B
+
+  val memResp = Wire(Valid(new StreamResp(tagBits)))
+  memResp.valid := io.mem.resp.valid
+  memResp.bits.tag := io.mem.resp.bits.tag
+  memResp.bits.data := io.mem.resp.bits.data
+  streamerA.io.resp := memResp
+  streamerB.io.resp := memResp
 
   io.mem.s1_kill := false.B
   io.mem.s2_kill := false.B

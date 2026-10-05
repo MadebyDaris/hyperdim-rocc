@@ -14,6 +14,10 @@ int main() {
 
     uint64_t hw_distance = 0;
 
+    /* words per vector = 4 (default cfgWords is the full elaborated buffer,
+     * which would stream 128 words and read past these 4-word arrays). */
+    HYPERDIM_SETCFG(4, 1);
+
     printf("Starting HyperDim RoCC Hamming Distance...\n");
 
     uint64_t start_cycles = read_cycles();

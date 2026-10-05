@@ -3,10 +3,17 @@ package hyperdim.mem
 import chisel3._
 import chisel3.util._
 
-import freechips.rocketchip.tile._
-import freechips.rocketchip.rocket.{HellaCacheReq, HellaCacheResp}
-import freechips.rocketchip.rocket.constants.MemoryOpConstants
-import org.chipsalliance.cde.config.Parameters
+/** Read request issued by a VectorStreamer. The owner converts it to a cache request. */
+class StreamReq(tagBits: Int) extends Bundle {
+  val addr = UInt(64.W)
+  val tag = UInt(tagBits.W)
+}
+
+/** Read response delivered to a VectorStreamer. */
+class StreamResp(tagBits: Int) extends Bundle {
+  val tag = UInt(tagBits.W)
+  val data = UInt(64.W)
+}
 
 /** VectorStreamer
   *
@@ -14,19 +21,26 @@ import org.chipsalliance.cde.config.Parameters
   * in order on `io.out`.
   *
   * Requests are issued in windows of at most `windowWords` words: the reorder
-  * buffer has one slot per window word and the cache tag encodes only
+  * buffer has one slot per window word and the request tag encodes only
   * {streamId, slot}, so a window must be fully drained before the next one is
   * issued. Responses within a window may complete out of order. Streaming an
   * arbitrarily long region (e.g. a whole associative memory) therefore works
   * with a small, tag-bounded reorder buffer.
+  *
+  * @param windowWords words per window (the reorder buffer size)
+  * @param tagBits     width of the request/response tag
   */
-class VectorStreamer(windowWords: Int)(implicit p: Parameters)
-    extends Module
-    with MemoryOpConstants {
+class VectorStreamer(windowWords: Int, tagBits: Int) extends Module {
   require(windowWords > 1, "windowWords must be at least 2")
 
   val slotBits = log2Ceil(windowWords)
   val cntBits = log2Ceil(windowWords + 1)
+
+  require(
+    windowWords <= (1 << (tagBits - 1)),
+    s"windowWords ($windowWords) exceeds tag index capacity (${1 << (tagBits - 1)})"
+  )
+  require(tagBits >= slotBits + 2, s"tagBits ($tagBits) leaves no padding above $slotBits slot bits")
 
   val io = IO(new Bundle {
     val start = Input(Bool())
@@ -35,18 +49,12 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters)
     val streamId = Input(UInt(1.W))
     val done = Output(Bool())
 
-    val req = Decoupled(new HellaCacheReq) // cache coherence unit: 64-bit word
-    val resp =
-      Input(Valid(new HellaCacheResp)) // cache coherence unit: 64-bit word
+    // Handshakes and data with the cache for each word in the stream.
+    val req = Decoupled(new StreamReq(tagBits))
+    val resp = Input(Valid(new StreamResp(tagBits)))
 
     val out = Decoupled(UInt(64.W))
   })
-
-  val tagBits = io.req.bits.tag.getWidth
-  require(
-    windowWords <= (1 << (tagBits - 1)),
-    s"windowWords ($windowWords) exceeds tag index capacity (${1 << (tagBits - 1)})"
-  )
 
   object State extends ChiselEnum {
     val sIdle, sRun = Value
@@ -58,10 +66,11 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters)
   val totalLen = Reg(UInt(32.W))
   val regStreamId = Reg(UInt(1.W))
 
-  val winBase = Reg(UInt(32.W)) // global word index of current window start
+  val winBase = Reg(UInt(32.W))       // global word index of current window start
   val issueIdx = Reg(UInt(cntBits.W)) // words issued within the window
-  val commitIdx = Reg(UInt(cntBits.W)) // words drained within the window
+  val commitIdx = Reg(UInt(cntBits.W))// words drained within the window
 
+  // Ordered buffer of words in the current window, and valid bits for each slot.
   val dataBuf = Reg(Vec(windowWords, UInt(64.W)))
   val validBuf = RegInit(VecInit(Seq.fill(windowWords)(false.B)))
 
@@ -70,33 +79,16 @@ class VectorStreamer(windowWords: Int)(implicit p: Parameters)
   // number of words in current window (saturates at windowWords)
 
   // ---------------- Issuer ----------------
-  io.req.bits := DontCare
   // byte address in memory to fetch the next word
   io.req.bits.addr := regBase + ((winBase + issueIdx) << 3.U)
+
   // tag = { streamId (MSB), zero-pad, issueIdx slot (LSBs) }.
-  // Must be packed explicitly to the full tag width so the stream-ID bit
-  // lands at io.req.bits.tag.getWidth-1 (the completer reads resp.tag(MSB)).
+  // The stream-ID bit lands at tagBits-1, where the completer reads it back.
   io.req.bits.tag := Cat(
     regStreamId,
     0.U((tagBits - slotBits - 1).W),
     issueIdx(slotBits - 1, 0)
   )
-  io.req.bits.cmd := M_XRD
-  io.req.bits.size := log2Ceil(8).U
-  io.req.bits.signed := false.B
-  io.req.bits.phys := false.B
-  // dprv: privilege level
-  io.req.bits.dprv := 3.U(2.W)
-  // dv: valid bit for dprv (we keep it false)
-  io.req.bits.dv := false.B
-
-  // disable cache allocation and exceptions
-  // no_alloc: don't allocate in TLB
-  io.req.bits.no_alloc := false.B
-  // no_xcpt: don't raise exception
-  io.req.bits.no_xcpt := false.B
-  // no_resp: don't send response
-  io.req.bits.no_resp := false.B
 
   io.req.valid := (state === sRun) && (issueIdx < winSize)
   when(io.req.fire) {

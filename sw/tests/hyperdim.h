@@ -15,7 +15,7 @@
 #define HYPERDIM_OP_GETCFG    7
 #define HYPERDIM_OP_AM_SEARCH 8
 
-/* AM-search distance/similarity metric (cfgMetric, 2 bits). */
+/* AM-search distance/similarity metric (cfgMetric, 2 bits). Choices of distqnce metrics*/
 #define HYPERDIM_METRIC_HAMMING 0
 #define HYPERDIM_METRIC_DOT     1
 #define HYPERDIM_METRIC_COSINE  2

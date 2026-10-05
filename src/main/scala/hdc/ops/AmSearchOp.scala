@@ -166,27 +166,31 @@ class AmSearchOp(maxQueryWords: Int, maxClasses: Int) extends Module {
         val wordDot = int8Dot(io.classes.bits, qWord)
         val wordSq = int8Sq(io.classes.bits)
 
+        val totalHamming = accHamming + wordHamming
+        val totalDot = accDot + wordDot
+        val totalSq = accSqC + wordSq
+
         when(isHamming) {
-          accHamming := accHamming + wordHamming
+          accHamming := totalHamming
         }.otherwise {
-          accDot := accDot + wordDot
-          when(isCosine) { accSqC := accSqC + wordSq }
+          accDot := totalDot
+          when(isCosine) { accSqC := totalSq }
         }
 
         val lastWord = wordIdx === io.numWords - 1.U
         when(lastWord) {
           when(isHamming) {
-            when(!haveBest || (accHamming.asSInt < bestScore)) {
-              bestScore := accHamming.asSInt
+            when(!haveBest || (totalHamming.asSInt < bestScore)) {
+              bestScore := totalHamming.asSInt
               bestIdx := classIdx
               haveBest := true.B
             }
           }.elsewhen(isCosine) {
-            classDot(classIdx(cIdxBits - 1, 0)) := accDot
-            classSq(classIdx(cIdxBits - 1, 0)) := accSqC
+            classDot(classIdx(cIdxBits - 1, 0)) := totalDot
+            classSq(classIdx(cIdxBits - 1, 0)) := totalSq
           }.otherwise { // DOT
-            when(!haveBest || (accDot > bestScore)) {
-              bestScore := accDot
+            when(!haveBest || (totalDot > bestScore)) {
+              bestScore := totalDot
               bestIdx := classIdx
               haveBest := true.B
             }
